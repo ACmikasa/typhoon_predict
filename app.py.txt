@@ -1,0 +1,97 @@
+import csv
+import torch
+from flask import Flask, request,jsonify
+from flask_cors import CORS
+from solve_file import load_csv
+from utils.dataset import CycloneTracksDataset
+from utils.markov_sampler import MarkovSamplingLoss
+from select_typhoon import get_message
+from selenium import webdriver
+
+app = Flask(__name__)
+CORS(app)
+app.lat_list = []
+app.lng_list = []
+app.filename = ''
+app.response={}
+
+
+@app.route("/upload", methods=["POST"])
+def save_file():
+
+    data = request.files
+    print("start...")
+    print(data)
+    file = data['file']
+    print(file.filename)
+
+    # 文件写入磁盘
+    file.save(file.filename)
+    app.filename = file.filename
+    print("end...")
+
+    app.lat_list = load_csv(file.filename, 1).tolist()
+    app.lng_list = load_csv(file.filename, 2).tolist()
+
+    response = {
+        'lat_list': app.lat_list,
+        'lng_list': app.lng_list
+    }
+
+    app.response = jsonify(response)
+    return app.response
+
+
+
+@app.route("/true_path",methods=["GET"])
+def get_msg_():
+    data = app.response
+    return data
+
+
+@app.route("/chuli",methods=["GET"])
+def get_msg():  #模型预测
+    prev_path = 'prev_' + app.filename
+    model = torch.load('./model/blstm_CNset.pkl')
+    model.eval()
+    loss = MarkovSamplingLoss(model, samples=150)
+    # test_data = loadCSV('./prev/hato')
+    test_dataset = CycloneTracksDataset(data_path=app.filename, train=False, loadway=False)  #加载数据集
+
+    track_id = 1  # 假设用户上传的 CSV 文件表示第一条台风的数据
+    print(test_dataset)
+    print('=========================')
+    X, y = test_dataset.get_track_data(track_id)
+    # y_hat = step(X, y, loss)
+
+    loss, out = loss(X, y, num_batches=1)  #模型预测
+    y_hat = out.mean(0)  #取预测值(均值)
+    y_hat = test_dataset.denormalize(y_hat.detach().numpy())  #反归一化
+
+    with open(prev_path, 'w', newline='') as file:  #保存到预测文件
+        writer = csv.writer(file)
+        writer.writerows(y_hat.tolist())
+
+
+
+# 这里可以直接用y_Hat的数据，但是格式要转一下（麻烦）
+    lat = load_csv(prev_path, 0).tolist()
+    lon = load_csv(prev_path, 1).tolist()
+    response = {
+        'lat_list': lat,
+        'lng_list': lon
+    }
+    return jsonify(response)  #返回预测数据
+
+# 爬虫爬取 (未开发)
+@app.route("/get_message",methods=["GET","POST"])
+def get_typhoon_message():
+    name = request.name
+    typhoon_message = get_message(name)
+    return jsonify(typhoon_message)
+
+
+
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=5000, debug=True)
